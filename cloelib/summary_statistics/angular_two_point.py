@@ -37,6 +37,7 @@ from cloelib.profiling import profile_function
 import interpax
 import jax.numpy as np
 import jax
+import numpy as _numpy
 
 # results imports
 from cosmolib.data import AngularPowerSpectrum, COSEBI
@@ -640,15 +641,29 @@ class AngularTwoPoint:
 
         Returns:
             (callable): `(field1, field2) -> P(k_lz, z_l)`, shape
-            `(len(ells), len(z_l))`, memoized per pair of fields.
+            `(len(ells), len(z_l))`, memoized per pair of fields. When the bank's
+            perturbations define `limber_matter_power_spectrum(k_lz, z_l)` and the bank's
+            grids are their own (`k`, `z`), it gives the total-matter spectrum.
         """
         cache = {}
+        # A backend may gather the total-matter P at the Limber wavenumbers itself, from its
+        # own table, when the bank's grids are that table's.
+        perturbations = bank.perturbations
+        own = getattr(perturbations, "limber_matter_power_spectrum", None)
+        if own is not None and not (
+            _numpy.array_equal(_numpy.asarray(bank.ks), _numpy.asarray(perturbations.k))
+            and _numpy.array_equal(_numpy.asarray(bank.zs), _numpy.asarray(perturbations.z))
+        ):
+            own = None
 
         def limber_pk(field1, field2):
             key = tuple(sorted((field1, field2)))
             if key not in cache:
-                Pk = bank.base(field1, field2)
-                cache[key] = Pkl_interp_vmap(k_lz, z_l, bank.ks, bank.zs, Pk.T)
+                if own is not None and key == (MATTER, MATTER):
+                    cache[key] = own(k_lz, z_l)
+                else:
+                    Pk = bank.base(field1, field2)
+                    cache[key] = Pkl_interp_vmap(k_lz, z_l, bank.ks, bank.zs, Pk.T)
             return cache[key]
 
         return limber_pk
