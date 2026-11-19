@@ -37,6 +37,7 @@ from cloelib.profiling import profile_function
 import interpax
 import jax.numpy as np
 import jax
+import numpy as _numpy
 
 # results imports
 from cosmolib.data import AngularPowerSpectrum, COSEBI
@@ -63,6 +64,18 @@ def Cl_integration(WT1, WT2, Pkl, H, chi2, weights) -> jax.numpy.ndarray:
         (jax.numpy.ndarray): Angular power spectrum Cl with shape (len(ells), len(ells), len(ells)).
     """
     return np.einsum("iz,jz,lz,z,z,z->lij", WT1, WT2, Pkl, 1 / H, 1 / chi2, weights)
+
+
+@jax.jit
+def Cl_integration_float32(WT1, WT2, Pkl, H, chi2, weights) -> jax.numpy.ndarray:
+    """`Cl_integration` as one float32 matrix product: the redshift-only factors are combined
+    in the inputs' precision, then W1 W2 (i, j, z) contracts with P (l, z) in float32.
+    Returns float64 when x64 is enabled."""
+    f32 = np.float32
+    w = (weights / (H * chi2)).astype(f32)
+    pair = (WT1.astype(f32) * w)[:, None, :] * WT2.astype(f32)[None, :, :]
+    cl = np.einsum("ijz,lz->lij", pair, Pkl.astype(f32), preferred_element_type=f32)
+    return cl.astype(H.dtype)
 
 
 @jax.jit
@@ -640,15 +653,29 @@ class AngularTwoPoint:
 
         Returns:
             (callable): `(field1, field2) -> P(k_lz, z_l)`, shape
-            `(len(ells), len(z_l))`, memoized per pair of fields.
+            `(len(ells), len(z_l))`, memoized per pair of fields. When the bank's
+            perturbations define `limber_matter_power_spectrum(k_lz, z_l)` and the bank's
+            grids are their own (`k`, `z`), it gives the total-matter spectrum.
         """
         cache = {}
+        # A backend may gather the total-matter P at the Limber wavenumbers itself, from its
+        # own table, when the bank's grids are that table's.
+        perturbations = bank.perturbations
+        own = getattr(perturbations, "limber_matter_power_spectrum", None)
+        if own is not None and not (
+            _numpy.array_equal(_numpy.asarray(bank.ks), _numpy.asarray(perturbations.k))
+            and _numpy.array_equal(_numpy.asarray(bank.zs), _numpy.asarray(perturbations.z))
+        ):
+            own = None
 
         def limber_pk(field1, field2):
             key = tuple(sorted((field1, field2)))
             if key not in cache:
-                Pk = bank.base(field1, field2)
-                cache[key] = Pkl_interp_vmap(k_lz, z_l, bank.ks, bank.zs, Pk.T)
+                if own is not None and key == (MATTER, MATTER):
+                    cache[key] = own(k_lz, z_l)
+                else:
+                    Pk = bank.base(field1, field2)
+                    cache[key] = Pkl_interp_vmap(k_lz, z_l, bank.ks, bank.zs, Pk.T)
             return cache[key]
 
         return limber_pk
@@ -851,6 +878,10 @@ class AngularTwoPoint:
 
         invH = 1.0 / H
         invchi2 = 1.0 / chi2
+        # A backend with `limber_dtype = float32` gathers P in float32 and has the
+        # density-density Limber sums done in float32.
+        low = getattr(self.tracer1.perturbations, "limber_dtype", None) == np.float32
+        integrate = Cl_integration_float32 if low else Cl_integration
 
         C_ell_calc = 0.0
         for field1, W1, ell_dep1 in terms1:
@@ -866,7 +897,7 @@ class AngularTwoPoint:
                     # (dens_1 x RSD_2)
                     C = Cl_int_iz_ljz(W1, W2, Pkl, invH, invchi2, weights)
                 else:
-                    C = Cl_integration(W1, W2, Pkl, H, chi2, weights)
+                    C = integrate(W1, W2, Pkl, H, chi2, weights)
                 C_ell_calc = C_ell_calc + c_0 * C * dz
 
         prefactor_cell = self._angular_prefactor(ells)

@@ -224,6 +224,50 @@ def cached_stacked_simpson(n: int) -> jnp.ndarray:
     return _cached_stacked_simpson_py(int(n))
 
 
+@lru_cache(maxsize=None)
+def _efficiency_bands(n: int, tail: int = 6):
+    """`stacked_simpson(n)` less the upper triangle of ones, in banded form: row `j` differs
+    from one at its first three nodes (`a[j]`) and the grid's last three (`b[j]`); the last
+    `tail` rows, where the two overlap, are a dense block `d` on the last `tail` nodes."""
+    c = _stacked_simpson_np(int(n)) - np.triu(np.ones((n, n)))
+    tail = min(tail, n)
+    a, b = np.zeros((n, 3)), np.zeros((n, 3))
+    for j in range(n - tail):
+        a[j] = c[j, j:j + 3]
+        b[j] = c[j, n - 3:]
+        rest = c[j].copy()
+        rest[j:j + 3] = 0.0
+        rest[n - 3:] = 0.0
+        if np.any(rest):
+            raise ValueError("stacked Simpson weights are not banded as assumed")
+    return a, b, c[n - tail:, n - tail:]
+
+
+def lensing_efficiency(dndz, chi, dz):
+    """Flat-sky lensing efficiency `einsum("ik,jk,jk->ij", dndz, 1 - chi_j / chi_k, W) dz` with
+    `W = stacked_simpson(n)`, in O(n): `A_j - chi_j B_j`, with `A`, `B` the `W`-weighted tails of
+    `dndz` and `dndz / chi` (suffix sums plus `W`'s banded end correction). The same quadrature
+    to rounding, without the (n, n) distance-ratio matrix.
+
+    Args:
+        dndz: (n_bins, n) source distributions on a uniform grid.
+        chi: (n,) comoving distances on that grid.
+        dz: the grid spacing.
+    """
+    n = dndz.shape[-1]
+    a, b, d = _efficiency_bands(n)
+    tail = d.shape[0]
+
+    def weighted_tail(f):
+        pad = jnp.pad(f, ((0, 0), (0, 2)))
+        band = (a[:, 0] * f + a[:, 1] * pad[:, 1:n + 1] + a[:, 2] * pad[:, 2:n + 2]
+                + f[:, n - 3:] @ b.T)
+        end = jnp.pad(f[:, n - tail:] @ d.T, ((0, 0), (n - tail, 0)))
+        return jnp.cumsum(f[:, ::-1], axis=1)[:, ::-1] + band + end
+
+    return (weighted_tail(dndz) - chi * weighted_tail(dndz / chi)) * dz
+
+
 def legendre(n, x):
     """Evaluate the Legendre polynomial of degree ``n`` at ``x``.
 
