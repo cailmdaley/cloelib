@@ -67,6 +67,18 @@ def Cl_integration(WT1, WT2, Pkl, H, chi2, weights) -> jax.numpy.ndarray:
 
 
 @jax.jit
+def Cl_integration_float32(WT1, WT2, Pkl, H, chi2, weights) -> jax.numpy.ndarray:
+    """`Cl_integration` as one float32 matrix product: the redshift-only factors are combined
+    in the inputs' precision, then W1 W2 (i, j, z) contracts with P (l, z) in float32.
+    Returns float64 when x64 is enabled."""
+    f32 = np.float32
+    w = (weights / (H * chi2)).astype(f32)
+    pair = (WT1.astype(f32) * w)[:, None, :] * WT2.astype(f32)[None, :, :]
+    cl = np.einsum("ijz,lz->lij", pair, Pkl.astype(f32), preferred_element_type=f32)
+    return cl.astype(H.dtype)
+
+
+@jax.jit
 def Cl_integration_batched(WT1, WT2, Pkl, H, chi2, weights) -> jax.numpy.ndarray:
     """
     Same as `Cl_integration`, batched (and summed) over an extra leading
@@ -866,6 +878,10 @@ class AngularTwoPoint:
 
         invH = 1.0 / H
         invchi2 = 1.0 / chi2
+        # A backend with `limber_dtype = float32` gathers P in float32 and has the
+        # density-density Limber sums done in float32.
+        low = getattr(self.tracer1.perturbations, "limber_dtype", None) == np.float32
+        integrate = Cl_integration_float32 if low else Cl_integration
 
         C_ell_calc = 0.0
         for field1, W1, ell_dep1 in terms1:
@@ -881,7 +897,7 @@ class AngularTwoPoint:
                     # (dens_1 x RSD_2)
                     C = Cl_int_iz_ljz(W1, W2, Pkl, invH, invchi2, weights)
                 else:
-                    C = Cl_integration(W1, W2, Pkl, H, chi2, weights)
+                    C = integrate(W1, W2, Pkl, H, chi2, weights)
                 C_ell_calc = C_ell_calc + c_0 * C * dz
 
         prefactor_cell = self._angular_prefactor(ells)
