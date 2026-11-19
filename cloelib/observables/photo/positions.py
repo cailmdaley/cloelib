@@ -47,9 +47,10 @@ import weakref
 from typing import Any, Callable, Protocol
 
 from cloelib.auxiliary.units import SPEED_OF_LIGHT
-from cloelib.auxiliary.geometry import transverse_distance
+from cloelib.auxiliary.geometry import is_flat, transverse_distance
 from cloelib.cosmology.cosmology import Perturbations
 from cloelib.auxiliary.math_utils import (
+    lensing_efficiency,
     cached_stacked_simpson,
     check_nonzero_redshifts,
 )
@@ -1010,6 +1011,8 @@ class PositionsTracer:
         dz = z[1] - z[0]  # assuming equispaced!
         rz = self.background.comoving_distance(z)
         Ok, H0 = self.background.Omega_k0, self.background.H0
+        if is_flat(Ok):
+            return lensing_efficiency(self.dndz_shifted, rz, dz)
         rzrz = (
             transverse_distance(rz[None, :] - rz[:, None], Ok, H0)
             / transverse_distance(rz, Ok, H0)[None, :]
